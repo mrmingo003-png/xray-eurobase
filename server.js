@@ -4,15 +4,19 @@
  * on hanamii.jp via ZIP upload (hanamii cannot take a Docker image).
  *
  * What it does
- *  1. Finds the xray binary: bundled binary first (several candidate
+ *  1. Listens on $PORT FIRST (the port the platform assigns). Plain
+ *     HTTP requests (platform health checks) get 200 immediately.
+ *     WebSocket upgrades are forwarded byte-for-byte to the local xray
+ *     port once xray is up — the handshake is never rewritten or
+ *     re-parsed. (Listen-first matters: on buildpack platforms the
+ *     xray binary must be downloaded at runtime, which can take
+ *     minutes, and a health check that cannot reach $PORT fails the
+ *     deploy — Eurobase 2026-11-19: "Runtime startup timed out".)
+ *  2. Finds the xray binary: bundled binary first (several candidate
  *     paths); if it is missing, downloads the pinned release from
  *     GitHub at runtime and extracts it with pure JS (see below).
- *  2. Writes an xray config from env vars (PORT / UUID / WS_PATH) and
+ *  3. Writes an xray config from env vars (PORT / UUID / WS_PATH) and
  *     starts xray listening on 127.0.0.1:<a free local port>.
- *  3. Listens on $PORT (the port hanamii assigns). Plain HTTP requests
- *     (platform health checks) get 200. WebSocket upgrades are forwarded
- *     byte-for-byte to the local xray port — the handshake is never
- *     rewritten or re-parsed.
  *
  * Changes vs v1 (the v1 failure)
  *  v1 failed twice on hanamii with "spawn ENOENT": the wrapper
@@ -439,7 +443,6 @@ async function main() {
   log('cwd:', process.cwd());
   log('__dirname:', __dirname);
   await logDirectoryContents();
-  const bin = await ensureXray();
   const xrayPort = process.env.XRAY_PORT
     ? parseInt(process.env.XRAY_PORT, 10)
     : await freePort();
@@ -447,6 +450,11 @@ async function main() {
     logErr('FATAL: invalid XRAY_PORT:', process.env.XRAY_PORT);
     process.exit(1);
   }
+  // Listen FIRST: platform health checks must reach $PORT while xray is
+  // still downloading/starting (buildpack platforms have no bundled
+  // binary). WS upgrades before xray is up fail fast; clients retry.
+  startFront(xrayPort);
+  const bin = await ensureXray();
   const config = buildConfig(xrayPort);
   let configPath = CONFIG_PATH;
   try {
@@ -469,7 +477,6 @@ async function main() {
   process.on('SIGINT', shutdown);
   await waitForPort(xrayPort);
   log('xray is listening on 127.0.0.1:' + xrayPort);
-  startFront(xrayPort);
 }
 
 main().catch((e) => {
